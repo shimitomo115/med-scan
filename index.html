@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>内服薬スキャン照合（試作）</title>
+<style>
+  body{font-family:system-ui,sans-serif;margin:0;padding:10px;background:#f4f7f7;color:#123}
+  h1{font-size:17px;margin:4px 0 8px}
+  nav{display:flex;gap:4px;margin-bottom:8px}
+  nav button{flex:1;background:#cfe3e2;color:#123}
+  nav button.on{background:#0b7a75;color:#fff}
+  section{background:#fff;border-radius:10px;padding:10px;margin-bottom:10px;box-shadow:0 1px 3px #0001}
+  button,select,input{font-size:16px;padding:8px;margin:3px 0;border-radius:8px}
+  input,select{border:1px solid #bbb}
+  button{background:#0b7a75;color:#fff;border:0}
+  button.sub{background:#678} button.del{background:#c44;padding:4px 8px;font-size:13px}
+  video{width:100%;max-height:220px;background:#000;border-radius:8px}
+  table{width:100%;border-collapse:collapse;font-size:14px}
+  td,th{border-bottom:1px solid #ddd;padding:4px;text-align:left}
+  .ok{background:#d8f5e0}.ng{background:#ffd9d9}.warn{background:#fff3c4}
+  #verdict{font-size:22px;font-weight:bold;text-align:center;padding:14px;border-radius:10px;margin:6px 0}
+  #last{font-size:13px;color:#456;word-break:break-all;min-height:18px}
+  .small{font-size:12px;color:#567}
+  .hide{display:none}
+</style>
+</head>
+<body>
+<h1>内服薬スキャン照合（試作・研究用）</h1>
+
+<nav>
+  <button data-tab="reg">① 薬剤登録</button>
+  <button data-tab="ord">② 模擬指示</button>
+  <button data-tab="chk" class="on">③ 照合</button>
+</nav>
+
+<div id="diag" style="display:none;background:#ffd9d9;padding:8px;border-radius:8px;font-size:14px;margin-bottom:8px"></div>
+<!-- カメラは全タブ共通 -->
+<section>
+  <video id="video" playsinline muted></video>
+  <button id="startBtn">カメラ開始</button>
+  <button id="stopBtn" class="sub">停止</button>
+  <label><input type="file" id="photo" accept="image/*" capture="environment" style="display:none">
+    <span style="background:#678;color:#fff;padding:8px;border-radius:8px;display:inline-block">写真で読む</span></label>
+  <div id="last"></div>
+</section>
+
+<!-- ① 薬剤登録 -->
+<div id="tab-reg" class="hide">
+  <section>
+    <b>PTPシートを読み取って薬剤名を付ける</b>
+    <div class="small">カメラでシートのバーコードを読むと、コードが下に入ります。</div>
+    コード <input id="regCode" size="16" placeholder="スキャンで自動入力"><br>
+    薬剤名 <input id="regName" placeholder="例：アムロジピン錠5mg">
+    <button id="regAdd">登録</button>
+  </section>
+  <section>
+    <b>登録済み薬剤</b>
+    <table><tbody id="drugList"></tbody></table>
+  </section>
+</div>
+
+<!-- ② 模擬指示 -->
+<div id="tab-ord" class="hide">
+  <section>
+    <b>模擬内服指示を作る</b><br>
+    患者ID <input id="oPid" size="8" placeholder="P0001">
+    患者名 <input id="oPname" size="8" placeholder="テスト太郎"><br>
+    時間帯 <select id="oTiming"><option>朝</option><option>昼</option><option>夕</option><option>眠前</option></select>
+    薬剤 <select id="oDrug"></select>
+    数量 <input id="oQty" type="number" value="1" min="1" style="width:60px">
+    <button id="oAdd">指示を追加</button>
+  </section>
+  <section>
+    <b>指示一覧</b>
+    <table><thead><tr><th>患者</th><th>時間</th><th>薬剤</th><th>数</th><th></th></tr></thead><tbody id="orderList"></tbody></table>
+    <button id="backupBtn" class="sub">設定をバックアップ保存</button>
+    <label><input type="file" id="restore" accept=".json" style="display:none">
+      <span style="background:#678;color:#fff;padding:8px;border-radius:8px;display:inline-block">バックアップを読込</span></label>
+  </section>
+</div>
+
+<!-- ③ 照合 -->
+<div id="tab-chk">
+  <section>
+    患者 <select id="cPid"></select>
+    時間帯 <select id="cTiming"><option>朝</option><option>昼</option><option>夕</option><option>眠前</option></select>
+    <div class="small">患者リストバンドのコード（患者IDと同じ文字列）を読んでも切り替わります。</div>
+    <div id="verdict">—</div>
+    <table><thead><tr><th>薬剤</th><th>指示</th><th>読取</th><th>判定</th></tr></thead><tbody id="tbl"></tbody></table>
+    <button id="resetBtn" class="sub">やり直し</button>
+    <button id="confirmBtn">確認完了として記録</button>
+    <button id="exportBtn" class="sub">記録CSV出力</button>
+  </section>
+</div>
+
+<p class="small">※研究用の試作品です。投与可否の判断は看護師が行ってください。データはこの端末のブラウザ内にのみ保存されます。実在患者の情報は入力しないでください。</p>
+
+<script type="module">
+// 読取ライブラリは後から読み込む（失敗してもボタンは動くように）
+let readBarcodes = null;
+const libReady = import("https://cdn.jsdelivr.net/npm/zxing-wasm@2.2.0/dist/es/reader/index.js")
+  .then(m => { readBarcodes = m.readBarcodes; })
+  .catch(e => diag("✖ 読取ライブラリを読み込めません（ネット接続を確認）: " + e.message));
+
+// ---------- 環境チェック（原因を画面に表示） ----------
+function diag(msg){ const d = document.getElementById("diag"); d.innerHTML += msg + "<br>"; d.style.display = "block"; }
+if (!window.isSecureContext)
+  diag("✖ 安全な接続（https または localhost）で開かれていないため、カメラは使えません。PCなら「localhost」で開く方法を使ってください。");
+if (!navigator.mediaDevices?.getUserMedia)
+  diag("✖ このブラウザはカメラに対応していません → LINE・Gmail・Claudeアプリ内で開いている場合は、SafariまたはChromeで開き直してください。");
+
+const FORMATS = ["DataBar","DataBarLimited","DataBarExpanded","DataMatrix","QRCode","Code128","EAN13","EAN8"];
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+// ---------- 保存（端末内） ----------
+function load(k, d){ try{ return JSON.parse(localStorage.getItem(k)) ?? d; }catch{ return d; } }
+function save(k, v){ try{ localStorage.setItem(k, JSON.stringify(v)); }catch{} }
+let drugs  = load("drugs", {});    // コード -> 薬剤名
+let orders = load("orders", []);   // {pid,pname,timing,code,qty}
+let logs   = load("logs", []);
+let scanned = {};
+let tab = "chk";
+
+// ---------- タブ ----------
+document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
+  tab = b.dataset.tab;
+  document.querySelectorAll("nav button").forEach(x => x.classList.toggle("on", x === b));
+  ["reg","ord","chk"].forEach(t => $("tab-"+t).classList.toggle("hide", t !== tab));
+  renderAll();
+});
+
+// ---------- コード解析 ----------
+// GS1：(01)+14桁 が商品コード。(17)有効期限。13桁JANは先頭0で14桁に揃える
+function parseCode(text){
+  const t = text.replace(/[()\x1d\s]/g, "");
+  const m = t.match(/^01(\d{14})/);
+  if (m) return { code: m[1], exp: (t.slice(16).match(/^(?:.*?)17(\d{6})/) || [])[1] };
+  if (/^\d{13}$/.test(t)) return { code: "0" + t };
+  if (/^\d{8}$|^\d{14}$/.test(t)) return { code: t };
+  return { other: text };   // 薬以外（患者IDなど）
+}
+
+let lastCode = "", lastTime = 0;
+function handleCode(text){
+  const now = Date.now();
+  if (text === lastCode && now - lastTime < 2000) return;
+  lastCode = text; lastTime = now;
+  const p = parseCode(text);
+
+  if (tab === "reg") {
+    if (p.code) { $("regCode").value = p.code; $("regName").value = drugs[p.code] || ""; $("regName").focus(); beep(880); }
+    $("last").textContent = "読取: " + text;
+    return;
+  }
+  if (tab !== "chk") { $("last").textContent = "読取: " + text; return; }
+
+  if (p.other) {                       // 患者IDとして扱う
+    if (orders.some(o => o.pid === p.other)) { $("cPid").value = p.other; scanned = {}; beep(880); renderCheck(); }
+    else $("last").textContent = `未登録の患者ID: ${p.other}`;
+    return;
+  }
+  scanned[p.code] = (scanned[p.code] || 0) + 1;
+  let msg = `読取: ${drugs[p.code] || "未登録の薬剤"} (${p.code})`;
+  if (p.exp) {
+    const y = 2000 + +p.exp.slice(0,2), mo = +p.exp.slice(2,4), d = +p.exp.slice(4,6);
+    const expDate = d ? new Date(y, mo-1, d) : new Date(y, mo, 0);
+    if (expDate < new Date()) msg += "　⚠有効期限切れ";
+  }
+  $("last").textContent = msg;
+  renderCheck();
+}
+
+// ---------- カメラ ----------
+let stream = null, timer = null, busy = false;
+async function scanImageData(img){
+  if (!readBarcodes) { await libReady; if (!readBarcodes) return; }
+  const res = await readBarcodes(img, { formats: FORMATS, tryHarder: true, maxNumberOfSymbols: 4 });
+  res.filter(r => r.isValid).forEach(r => handleCode(r.text));
+}
+$("startBtn").onclick = async () => {
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video:{ facingMode:"environment", width:{ideal:1920}, height:{ideal:1080} }, audio:false });
+  } catch(e) {
+    const why = e.name === "NotAllowedError" ? "カメラの使用が拒否されています。iPhone：設定→Safari→カメラ→「許可」／Android：アドレスバー左の鍵マーク→権限→カメラ→許可"
+              : e.name === "NotFoundError" ? "カメラが見つかりません"
+              : e.name === "NotReadableError" ? "他のアプリがカメラを使用中です。カメラアプリ等を閉じてください"
+              : (e.name + ": " + e.message);
+    diag("✖ カメラを開けません：" + why); alert(why); return;
+  }
+  const v = $("video"); v.srcObject = stream;
+  try { await v.play(); } catch(e) { diag("映像の再生に失敗: " + e.message); }
+  const c = document.createElement("canvas"), ctx = c.getContext("2d", { willReadFrequently:true });
+  clearInterval(timer);
+  timer = setInterval(async () => {
+    if (!v.videoWidth || busy) return;
+    busy = true;
+    c.width = v.videoWidth; c.height = v.videoHeight; ctx.drawImage(v, 0, 0);
+    try { await scanImageData(ctx.getImageData(0, 0, c.width, c.height)); } finally { busy = false; }
+  }, 350);
+};
+$("stopBtn").onclick = () => { clearInterval(timer); stream?.getTracks().forEach(t => t.stop()); };
+$("photo").onchange = async e => {
+  const bmp = await createImageBitmap(e.target.files[0]);
+  const c = document.createElement("canvas"); c.width = bmp.width; c.height = bmp.height;
+  const ctx = c.getContext("2d"); ctx.drawImage(bmp, 0, 0);
+  await scanImageData(ctx.getImageData(0, 0, bmp.width, bmp.height));
+  e.target.value = "";
+};
+
+// ---------- ① 薬剤登録 ----------
+$("regAdd").onclick = () => {
+  const code = $("regCode").value.trim(), name = $("regName").value.trim();
+  if (!code || !name) return alert("コードと薬剤名を入力してください");
+  drugs[code] = name; save("drugs", drugs);
+  $("regCode").value = ""; $("regName").value = ""; renderAll();
+};
+function renderDrugs(){
+  $("drugList").innerHTML = Object.entries(drugs).map(([c,n]) =>
+    `<tr><td>${esc(n)}<div class="small">${esc(c)}</div></td><td><button class="del" data-c="${esc(c)}">削除</button></td></tr>`).join("")
+    || `<tr><td class="small">まだありません</td></tr>`;
+  document.querySelectorAll("#drugList .del").forEach(b => b.onclick = () => {
+    if (!confirm("削除しますか？")) return;
+    delete drugs[b.dataset.c]; save("drugs", drugs); renderAll();
+  });
+}
+
+// ---------- ② 模擬指示 ----------
+$("oAdd").onclick = () => {
+  const o = { pid:$("oPid").value.trim(), pname:$("oPname").value.trim(), timing:$("oTiming").value,
+              code:$("oDrug").value, qty:Math.max(1, +$("oQty").value || 1) };
+  if (!o.pid || !o.code) return alert("患者IDと薬剤を指定してください（薬剤は先に①で登録）");
+  orders.push(o); save("orders", orders); renderAll();
+};
+function renderOrders(){
+  $("oDrug").innerHTML = Object.entries(drugs).map(([c,n]) => `<option value="${esc(c)}">${esc(n)}</option>`).join("");
+  $("orderList").innerHTML = orders.map((o,i) =>
+    `<tr><td>${esc(o.pid)} ${esc(o.pname)}</td><td>${esc(o.timing)}</td><td>${esc(drugs[o.code] || o.code)}</td><td>${o.qty}</td>
+     <td><button class="del" data-i="${i}">削除</button></td></tr>`).join("")
+    || `<tr><td class="small" colspan="5">まだありません</td></tr>`;
+  document.querySelectorAll("#orderList .del").forEach(b => b.onclick = () => {
+    orders.splice(+b.dataset.i, 1); save("orders", orders); renderAll();
+  });
+}
+$("backupBtn").onclick = () => download("scan_settings.json", JSON.stringify({ drugs, orders }, null, 1), "application/json");
+$("restore").onchange = async e => {
+  try {
+    const d = JSON.parse(await e.target.files[0].text());
+    drugs = d.drugs || {}; orders = d.orders || [];
+    save("drugs", drugs); save("orders", orders); renderAll(); alert("読み込みました");
+  } catch { alert("ファイルを読み込めませんでした"); }
+};
+
+// ---------- ③ 照合 ----------
+function renderPatients(){
+  const cur = $("cPid").value;
+  const pts = [...new Map(orders.map(o => [o.pid, o.pname])).entries()];
+  $("cPid").innerHTML = pts.map(([id,n]) => `<option value="${esc(id)}">${esc(id)} ${esc(n)}</option>`).join("");
+  if (pts.some(([id]) => id === cur)) $("cPid").value = cur;
+}
+$("cPid").onchange = $("cTiming").onchange = () => { scanned = {}; renderCheck(); };
+
+let lastVerdict = "";
+function renderCheck(){
+  const pid = $("cPid").value, tm = $("cTiming").value;
+  const my = orders.filter(o => o.pid === pid && o.timing === tm);
+  // 同じ薬が複数行あれば合算
+  const need = {}; my.forEach(o => need[o.code] = (need[o.code] || 0) + o.qty);
+  const rows = []; let ng = false, short = false;
+
+  for (const [code, q] of Object.entries(need)) {
+    const n = scanned[code] || 0;
+    let st, cls;
+    if (n === q) { st = "一致"; cls = "ok"; }
+    else if (n < q) { st = `不足 ${q-n}`; cls = "warn"; short = true; }
+    else { st = `過剰 ${n-q}`; cls = "ng"; ng = true; }
+    rows.push(`<tr class="${cls}"><td>${esc(drugs[code] || code)}</td><td>${q}</td><td>${n}</td><td>${st}</td></tr>`);
+  }
+  for (const code of Object.keys(scanned)) if (!(code in need)) {
+    ng = true;
+    rows.push(`<tr class="ng"><td>${esc(drugs[code] || "未登録 " + code)}</td><td>0</td><td>${scanned[code]}</td><td>指示外！</td></tr>`);
+  }
+  $("tbl").innerHTML = rows.join("") || `<tr><td class="small" colspan="4">この患者・時間帯の指示はありません</td></tr>`;
+
+  const v = $("verdict"); let verdict;
+  if (ng) { verdict = "✖ 指示と不一致"; v.className = "ng"; }
+  else if (Object.keys(need).length && !short) { verdict = "✔ すべて一致"; v.className = "ok"; }
+  else { verdict = Object.keys(scanned).length ? "スキャン中…（不足あり）" : "—"; v.className = Object.keys(scanned).length ? "warn" : ""; }
+  v.textContent = verdict;
+  if (verdict !== lastVerdict) { if (ng) beep(220, 700); else if (verdict.startsWith("✔")) beep(1200, 250); }
+  lastVerdict = verdict;
+}
+$("resetBtn").onclick = () => { scanned = {}; $("last").textContent = ""; renderCheck(); };
+$("confirmBtn").onclick = () => {
+  logs.push({ t:new Date().toLocaleString("ja-JP"), pid:$("cPid").value, timing:$("cTiming").value,
+              verdict:$("verdict").textContent,
+              detail:Object.entries(scanned).map(([c,n]) => `${drugs[c] || c}×${n}`).join(" / ") });
+  save("logs", logs); alert("記録しました"); scanned = {}; renderCheck();
+};
+$("exportBtn").onclick = () => {
+  const q = s => `"${String(s).replace(/"/g,'""')}"`;
+  download("scan_log.csv", "﻿日時,患者ID,時間帯,判定,読取内容\n" +
+    logs.map(r => [r.t, r.pid, r.timing, r.verdict, r.detail].map(q).join(",")).join("\n"), "text/csv");
+};
+
+// ---------- 共通 ----------
+function download(name, text, type){
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([text], { type })); a.download = name; a.click();
+}
+let ac;
+function beep(freq, ms = 150){
+  try {
+    ac = ac || new (window.AudioContext || window.webkitAudioContext)();
+    const o = ac.createOscillator(); o.frequency.value = freq; o.connect(ac.destination);
+    o.start(); o.stop(ac.currentTime + ms/1000);
+  } catch {}
+}
+// ---------- USBバーコードリーダー（キーボード入力型）対応 ----------
+// リーダーは数字を高速で打ち込んで最後にEnterを送る。入力欄の外で受けたものをスキャンとして扱う
+let kbBuf = "", kbLast = 0;
+document.addEventListener("keydown", e => {
+  if (e.target.matches("input,select,textarea")) return;
+  const now = Date.now();
+  if (now - kbLast > 80) kbBuf = "";      // 人の手入力（遅い）は捨てる
+  kbLast = now;
+  if (e.key === "Enter") { if (kbBuf.length >= 8) handleCode(kbBuf); kbBuf = ""; e.preventDefault(); return; }
+  if (e.key.length === 1) kbBuf += e.key;
+});
+
+function renderAll(){ renderDrugs(); renderOrders(); renderPatients(); renderCheck(); }
+renderAll();
+</script>
+</body>
+</html>
